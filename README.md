@@ -1,5 +1,5 @@
 - 👋 Hi, I’m @errcoder
-- 👀 I’m interested in git & devops
+- 👀 I’m interested in git, devops, mlops
 - 🌱 I’m currently learning git, devops
 - 💞️ I’m looking to collaborate on opensource contribution
 - 📫 How to reach me ...
