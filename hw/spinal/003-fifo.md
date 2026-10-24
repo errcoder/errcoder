@@ -788,3 +788,889 @@ readData
 그리고 **동시에 `write`와 `read`가 들어오는 경우**, **FULL 상태에서 write**, **EMPTY 상태에서 read**까지 테스트하겠습니다.
 
 이 테스트까지 통과시키면 그 다음에 **parameterized FIFO → UART RX FIFO 연결**로 넘어가면 됩니다.
+
+---
+
+---
+
+# 🚀 좋습니다. FIFO Simulation으로 계속 갑시다.
+
+이번에는 **코드를 그냥 실행하는 것보다 FIFO의 상태 변화를 직접 검증하는 것**에 집중하겠습니다.
+
+그리고 한 가지 먼저 짚고 가겠습니다.
+
+앞에서 만든 `SimpleFifo`에는 `depth`가 2의 거듭제곱이 아닐 때 pointer width와 비교식이 조금 더 신중해야 하는 부분이 있습니다. 이번 학습에서는 우선 **`depth = 4`**로 고정해서 동작 원리를 검증하고, 이후 parameterization을 제대로 정리하겠습니다.
+
+---
+
+# 1. 이번 Simulation에서 검증할 것
+
+FIFO를 다음 순서로 테스트하겠습니다.
+
+```text
+초기
+ ↓
+A write
+ ↓
+B write
+ ↓
+C write
+ ↓
+A read
+ ↓
+B read
+ ↓
+동시 write/read
+ ↓
+FULL 테스트
+ ↓
+EMPTY 테스트
+```
+
+특히 다음 네 가지를 반드시 확인합니다.
+
+| 상황 | 기대 결과 |
+|---|---|
+| EMPTY에서 read | 무시 |
+| FULL에서 write | 무시 |
+| write만 발생 | `count + 1` |
+| read만 발생 | `count - 1` |
+| write + read 동시 | `count` 유지 |
+
+---
+
+# 2. Simulation의 기본 원칙
+
+이번에는 테스트벤치에서도 **매 clock마다 상태를 확인**하겠습니다.
+
+예를 들어:
+
+```scala
+dut.clockDomain.waitSampling()
+```
+
+후에:
+
+```scala
+println(...)
+```
+
+을 실행합니다.
+
+이렇게 해야 waveform의 clock edge와 우리가 출력한 상태를 대응시킬 수 있습니다.
+
+---
+
+# 3. FIFO Simulation
+
+```scala
+import spinal.core._
+import spinal.core.sim._
+
+object SimpleFifoSim extends App {
+
+  SimConfig
+    .withWave
+    .doSim(
+      SimpleFifo(
+        dataWidth = 8,
+        depth = 4
+      )
+    ) { dut =>
+
+      // --------------------------------------------------------
+      // Initial values
+      // --------------------------------------------------------
+
+      dut.io.write     #= false
+      dut.io.writeData #= 0
+      dut.io.read      #= false
+
+      dut.clockDomain.forkStimulus(10)
+
+      // --------------------------------------------------------
+      // Helper
+      // --------------------------------------------------------
+
+      def printStatus(name: String): Unit = {
+
+        println(
+          f"$name%-20s " +
+          f"empty=${dut.io.empty.toBoolean} " +
+          f"full=${dut.io.full.toBoolean} " +
+          f"readData=0x${dut.io.readData.toBigInt}%02X"
+        )
+      }
+
+      // --------------------------------------------------------
+      // Initial state
+      // --------------------------------------------------------
+
+      dut.clockDomain.waitSampling()
+
+      printStatus("Initial")
+
+      assert(
+        dut.io.empty.toBoolean,
+        "FIFO must be empty initially"
+      )
+
+      assert(
+        !dut.io.full.toBoolean,
+        "FIFO must not be full initially"
+      )
+
+      // --------------------------------------------------------
+      // Write A
+      // --------------------------------------------------------
+
+      dut.io.writeData #= 0x41
+      dut.io.write     #= true
+
+      dut.clockDomain.waitSampling()
+
+      dut.io.write #= false
+
+      printStatus("After write A")
+
+      assert(
+        !dut.io.empty.toBoolean,
+        "FIFO should not be empty after writing A"
+      )
+
+      // --------------------------------------------------------
+      // Write B
+      // --------------------------------------------------------
+
+      dut.io.writeData #= 0x42
+      dut.io.write     #= true
+
+      dut.clockDomain.waitSampling()
+
+      dut.io.write #= false
+
+      printStatus("After write B")
+
+      // --------------------------------------------------------
+      // Write C
+      // --------------------------------------------------------
+
+      dut.io.writeData #= 0x43
+      dut.io.write     #= true
+
+      dut.clockDomain.waitSampling()
+
+      dut.io.write #= false
+
+      printStatus("After write C")
+
+      // --------------------------------------------------------
+      // Read A
+      // --------------------------------------------------------
+
+      assert(
+        dut.io.readData.toBigInt == 0x41,
+        "First FIFO data must be A"
+      )
+
+      dut.io.read #= true
+
+      dut.clockDomain.waitSampling()
+
+      dut.io.read #= false
+
+      printStatus("After read A")
+
+      // --------------------------------------------------------
+      // Read B
+      // --------------------------------------------------------
+
+      assert(
+        dut.io.readData.toBigInt == 0x42,
+        "Second FIFO data must be B"
+      )
+
+      dut.io.read #= true
+
+      dut.clockDomain.waitSampling()
+
+      dut.io.read #= false
+
+      printStatus("After read B")
+
+      // --------------------------------------------------------
+      // Read C
+      // --------------------------------------------------------
+
+      assert(
+        dut.io.readData.toBigInt == 0x43,
+        "Third FIFO data must be C"
+      )
+
+      dut.io.read #= true
+
+      dut.clockDomain.waitSampling()
+
+      dut.io.read #= false
+
+      printStatus("After read C")
+
+      // --------------------------------------------------------
+      // FIFO should now be empty
+      // --------------------------------------------------------
+
+      assert(
+        dut.io.empty.toBoolean,
+        "FIFO must be empty after reading all data"
+      )
+
+      println()
+      println("Basic FIFO test passed.")
+    }
+}
+```
+
+---
+
+# 4. 그런데 여기서 아주 중요한 문제
+
+방금 simulation을 보면 이런 코드가 있습니다.
+
+```scala
+dut.io.read #= true
+
+dut.clockDomain.waitSampling()
+
+dut.io.read #= false
+```
+
+그리고 그 전에:
+
+```scala
+assert(
+  dut.io.readData.toBigInt == 0x41
+)
+```
+
+를 검사했습니다.
+
+이것은 우리가 설계한 FIFO의 **readData 의미** 때문입니다.
+
+현재 FIFO는:
+
+```scala
+io.readData := mem(readPtr)
+```
+
+이기 때문에,
+
+```text
+read를 하기 직전
+        │
+        ▼
+readPtr가 가리키는 값
+        │
+        ▼
+readData
+```
+
+입니다.
+
+즉 현재 구현은:
+
+> **readData = FIFO의 현재 head**
+
+라고 보는 것이 맞습니다.
+
+---
+
+# 5. Waveform에서는 이렇게 보입니다
+
+A, B, C를 차례로 넣으면:
+
+```text
+clock       0   1   2   3
+            │   │   │   │
+
+write       0   1   1   1
+writeData       A   B   C
+
+count       0   1   2   3
+
+readData    ?   A   A   A
+```
+
+개념적으로 FIFO 내부는:
+
+```text
+writePtr
+   │
+   ▼
+
+┌─────┬─────┬─────┬─────┐
+│  A  │  B  │  C  │     │
+└─────┴─────┴─────┴─────┘
+  ▲
+  │
+readPtr
+```
+
+입니다.
+
+---
+
+# 6. 이번에는 FULL도 테스트합시다
+
+Depth가 4이므로 정확히 네 개를 넣으면:
+
+```text
+count = 4
+```
+
+가 됩니다.
+
+즉:
+
+```text
+full = true
+```
+
+가 되어야 합니다.
+
+테스트를 추가해봅시다.
+
+```scala
+// --------------------------------------------------------
+// Fill FIFO completely
+// --------------------------------------------------------
+
+dut.io.writeData #= 0x44
+dut.io.write     #= true
+
+dut.clockDomain.waitSampling()
+
+dut.io.write #= false
+
+printStatus("After write D")
+
+assert(
+  dut.io.full.toBoolean,
+  "FIFO must be full after four writes"
+)
+```
+
+그러면:
+
+```text
+FIFO
+
+A
+B
+C
+D
+
+count = 4
+full  = true
+empty = false
+```
+
+입니다.
+
+---
+
+# 7. FULL 상태에서 다시 Write
+
+이제 중요한 테스트입니다.
+
+```scala
+dut.io.writeData #= 0x55
+dut.io.write     #= true
+
+dut.clockDomain.waitSampling()
+
+dut.io.write #= false
+
+printStatus("Write while full")
+```
+
+우리는 내부에서:
+
+```scala
+val doWrite =
+  io.write && !io.full
+```
+
+라고 했습니다.
+
+현재:
+
+```text
+write = 1
+full  = 1
+```
+
+이므로:
+
+```text
+doWrite = 1 && 0
+        = 0
+```
+
+입니다.
+
+따라서 `0x55`는 FIFO에 들어가면 안 됩니다.
+
+이것도 검증할 수 있습니다.
+
+```text
+A
+B
+C
+D
+```
+
+상태가 그대로여야 합니다.
+
+---
+
+# 8. EMPTY 상태에서 Read
+
+반대로 모든 데이터를 읽은 뒤:
+
+```text
+count = 0
+empty = true
+```
+
+상태에서:
+
+```scala
+dut.io.read #= true
+```
+
+를 해도 아무 일도 일어나면 안 됩니다.
+
+왜냐하면:
+
+```scala
+val doRead =
+  io.read && !io.empty
+```
+
+이므로:
+
+```text
+read  = 1
+empty = 1
+
+doRead = 0
+```
+
+이기 때문입니다.
+
+이것 역시 FIFO의 매우 중요한 안전장치입니다.
+
+---
+
+# 9. 가장 중요한 테스트: 동시 Read + Write
+
+이제 FIFO의 핵심으로 들어갑니다.
+
+현재 FIFO가:
+
+```text
+A
+B
+C
+```
+
+라고 합시다.
+
+동시에:
+
+```text
+write = 1
+read  = 1
+```
+
+그리고:
+
+```text
+writeData = D
+```
+
+를 넣습니다.
+
+그러면 한 clock에서:
+
+```text
+A → read
+D → write
+```
+
+가 동시에 발생합니다.
+
+결과는:
+
+```text
+B
+C
+D
+```
+
+입니다.
+
+데이터 개수는:
+
+```text
+3
+```
+
+에서:
+
+```text
+3
+```
+
+으로 그대로입니다.
+
+그래서 우리가 작성한:
+
+```scala
+when(doWrite && !doRead) {
+  count := count + 1
+
+} elsewhen(!doWrite && doRead) {
+  count := count - 1
+}
+```
+
+가 중요한 것입니다.
+
+둘 다 true이면 두 조건 모두 false이므로:
+
+```text
+count 변경 없음
+```
+
+입니다.
+
+---
+
+# 10. 이것을 반드시 기억하세요
+
+FIFO의 `count` 변화는 세 가지뿐입니다.
+
+```text
+WRITE only
+    ↓
+count + 1
+
+
+READ only
+    ↓
+count - 1
+
+
+WRITE + READ
+    ↓
+count unchanged
+```
+
+그리고:
+
+```text
+NO WRITE + NO READ
+    ↓
+count unchanged
+```
+
+입니다.
+
+표로 보면:
+
+| write | read | count 변화 |
+|---:|---:|---:|
+| 0 | 0 | 0 |
+| 1 | 0 | +1 |
+| 0 | 1 | -1 |
+| 1 | 1 | 0 |
+
+이 표는 앞으로 FIFO 설계할 때 계속 머릿속에 가지고 있어야 합니다.
+
+---
+
+# 11. 그런데 FIFO 구현에서 한 단계 더 깊은 문제가 있습니다
+
+현재 구현을 자세히 보면:
+
+```scala
+val doWrite =
+  io.write && !io.full
+
+val doRead =
+  io.read && !io.empty
+```
+
+입니다.
+
+그러면 FIFO가 **FULL인데 동시에 read와 write가 들어오면** 어떻게 될까요?
+
+현재 설계에서는:
+
+```text
+full = true
+
+write = 1
+read  = 1
+```
+
+이면:
+
+```text
+doWrite = false
+doRead  = true
+```
+
+입니다.
+
+즉:
+
+```text
+read만 수행
+write는 거부
+```
+
+됩니다.
+
+이것은 한 가지 유효한 FIFO 정책입니다.
+
+하지만 다른 FIFO 설계에서는:
+
+> "FULL 상태에서 read와 write가 동시에 발생하면 write도 허용한다."
+
+라는 정책을 사용할 수도 있습니다.
+
+그 경우에는:
+
+```text
+FULL
+  │
+  ├── READ
+  └── WRITE
+       ↓
+둘 다 허용
+```
+
+할 수 있습니다.
+
+이 차이는 나중에 **FIFO throughput**을 이해할 때 중요합니다.
+
+---
+
+# 12. 지금 단계에서 중요한 것은 "정답 하나"가 아니라 정책
+
+FIFO 설계에서 다음을 명확히 정의해야 합니다.
+
+```text
+FULL + WRITE ?
+FULL + WRITE + READ ?
+
+EMPTY + READ ?
+EMPTY + WRITE + READ ?
+```
+
+즉 FIFO는 단순히 메모리를 만드는 문제가 아니라 **인터페이스의 동작 정책을 정의하는 문제**이기도 합니다.
+
+---
+
+# 13. 이번 단계에서 배운 구조
+
+현재 FIFO는:
+
+```text
+                 ┌──────────────────┐
+                 │                  │
+writeData ──────►│      Memory      │
+                 │                  │
+writePtr ───────►│                  │
+                 │                  │
+readPtr ────────►│                  │
+                 │                  │
+                 └──────────────────┘
+                     ▲          │
+                     │          ▼
+                 writePtr    readData
+                     │
+                     │
+                 ┌───┴───┐
+                 │ count │
+                 └───┬───┘
+                     │
+                ┌────┴────┐
+                ▼         ▼
+              empty      full
+```
+
+입니다.
+
+---
+
+# 14. 다음 단계에서 할 중요한 개선
+
+현재 `SimpleFifo`는 학습용으로 아주 좋지만, 실제 FPGA/ASIC 설계 관점에서는 개선할 부분이 있습니다.
+
+다음 단계에서는 이것을 하나씩 고치겠습니다.
+
+### ① `depth`가 4가 아닌 경우
+
+현재:
+
+```scala
+log2Up(depth)
+```
+
+와 pointer wrap을 더 정확하게 처리해야 합니다.
+
+예:
+
+```text
+depth = 5
+```
+
+이면 pointer가:
+
+```text
+0 → 1 → 2 → 3 → 4 → 0
+```
+
+이어야 하지:
+
+```text
+0 → 1 → 2 → 3 → 4 → 5 → ...
+```
+
+가 되면 안 됩니다.
+
+---
+
+### ② Memory를 제대로 이해하기
+
+현재:
+
+```scala
+Vec(Reg(...))
+```
+
+로 만들었습니다.
+
+다음에는 SpinalHDL의 `Mem`을 사용해서:
+
+```text
+Register 기반 저장소
+        ↓
+Memory 기반 저장소
+```
+
+차이를 살펴보겠습니다.
+
+---
+
+### ③ Read semantics
+
+특히:
+
+```scala
+io.readData := mem(readPtr)
+```
+
+와
+
+```text
+read 요청 → 다음 clock에 data
+```
+
+의 차이를 명확히 이해해야 합니다.
+
+이것은 FPGA Block RAM을 사용할 때 굉장히 중요합니다.
+
+---
+
+### ④ 마지막으로 UART + FIFO
+
+최종적으로는:
+
+```text
+                  ┌─────────┐
+Serial ──► UART RX ─► FIFO  │
+                  └────┬────┘
+                       │
+                       ▼
+                      CPU
+```
+
+그리고 반대로:
+
+```text
+CPU
+ │
+ ▼
+ FIFO
+ │
+ ▼
+UART TX
+ │
+ ▼
+Serial
+```
+
+구조를 만들게 됩니다.
+
+---
+
+# 🎯 지금 여기서 잠깐 멈추는 게 좋습니다
+
+다음 단계는 바로 더 복잡한 FIFO를 만드는 것보다 **현재 `SimpleFifo`의 simulation waveform을 직접 읽는 것**이 좋습니다.
+
+특히 다음을 GTKWave에서 확인해 보세요.
+
+```text
+write
+writeData
+read
+readData
+writePtr
+readPtr
+count
+empty
+full
+```
+
+그리고 머릿속으로:
+
+```text
+write A
+write B
+write C
+read A
+read B
+read C
+```
+
+할 때 각각의 clock에서
+
+```text
+writePtr
+readPtr
+count
+```
+
+가 어떻게 변해야 하는지 예측해보는 겁니다.
+
+**그 예측과 waveform이 일치하면 FIFO의 핵심 원리를 제대로 잡은 것입니다.**
+
+---
+
+---
+
+
